@@ -4,6 +4,8 @@ const nav = document.querySelector("[data-nav]");
 const form = document.querySelector("[data-inquiry]");
 const status = document.querySelector("[data-form-status]");
 let formStartedAt = Date.now();
+let pendingInquiryKey = inquiryId();
+let inquiryStarted = false;
 
 function syncHeader() {
   header?.classList.toggle("is-scrolled", window.scrollY > 18);
@@ -58,10 +60,10 @@ function attributionFields() {
 
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!form.reportValidity()) return;
+  if (form.classList.contains("is-sending") || !form.reportValidity()) return;
   const data = new FormData(form);
   const payload = Object.fromEntries(data.entries());
-  payload.idempotency_key = inquiryId();
+  payload.idempotency_key = pendingInquiryKey;
   payload.started_at = formStartedAt;
   Object.assign(payload, attributionFields());
   form.classList.add("is-sending");
@@ -74,7 +76,10 @@ form?.addEventListener("submit", async (event) => {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || !result.ok) throw new Error(result.error || "The production queue did not respond.");
+    trackWebsiteEvent("inquiry_submit");
     form.reset();
+    pendingInquiryKey = inquiryId();
+    inquiryStarted = false;
     formStartedAt = Date.now();
     setStatus("You’re in. Your project details are now in the private ChicagoShots queue. We’ll review them and follow up.");
   } catch (error) {
@@ -83,3 +88,29 @@ form?.addEventListener("submit", async (event) => {
     form.classList.remove("is-sending");
   }
 });
+
+// First-party, allowlisted counters. Never transmit form fields, full referrers, or query strings.
+function analyticsSource() {
+  const allowed=["instagram","facebook","tiktok","youtube","linkedin","google","email","direct","referral","other"];
+  const explicit=(new URLSearchParams(location.search).get("utm_source")||"").toLowerCase();
+  if(explicit)return allowed.includes(explicit)?explicit:"other";
+  if(!document.referrer)return "direct";
+  try{const host=new URL(document.referrer).hostname;return allowed.find(source=>source!=="other"&&source!=="direct"&&source!=="referral"&&host.split('.').includes(source))||"referral";}catch{return "other";}
+}
+function trackWebsiteEvent(event) {
+  if(navigator.doNotTrack==="1"||window.doNotTrack==="1"||navigator.globalPrivacyControl===true)return;
+  let visit;
+  try{visit=sessionStorage.getItem("chicagoshots-visit");if(!visit){visit=inquiryId();sessionStorage.setItem("chicagoshots-visit",visit);}}catch{return;}
+  const rawCampaign=new URLSearchParams(location.search).get("pf_campaign")||new URLSearchParams(location.search).get("utm_campaign")||"";
+  const campaign=/^[a-zA-Z0-9_-]{0,80}$/.test(rawCampaign)?rawCampaign:"";
+  const pages=["/","/sports","/events","/podcasts","/weddings"];
+  const payload={id:inquiryId(),session:visit,event,page:pages.includes(location.pathname)?location.pathname:"/",source:analyticsSource(),campaign};
+  void fetch("https://app.phantomforce.online/api/public/chicagoshots/website-events",{method:"POST",credentials:"omit",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),keepalive:true}).catch(()=>{});
+}
+trackWebsiteEvent("page_view");
+document.addEventListener("click",event=>{
+  const link=event.target.closest?.("a");if(!link)return;
+  const href=link.getAttribute("href")||"";
+  if(href==="#contact"||href.startsWith("mailto:booking@chicagoshots.com")||href.startsWith("https://calendar.app.google/"))trackWebsiteEvent("cta_click");
+});
+form?.addEventListener("input",()=>{if(!inquiryStarted){inquiryStarted=true;trackWebsiteEvent("inquiry_start");}});
